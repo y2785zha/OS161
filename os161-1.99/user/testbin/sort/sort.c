@@ -127,7 +127,7 @@ check(void)
 
 int
 main(void)
-{
+{    	
 	initarray();
 	sort(A, SIZE);
 	check();

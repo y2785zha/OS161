@@ -50,11 +50,18 @@
 #include <vfs.h>
 #include <synch.h>
 #include <kern/fcntl.h>  
+#include "opt-A2.h"
 
 /*
  * The process for the kernel; this holds all the kernel-only threads.
  */
 struct proc *kproc;
+
+/*
+struct lock *destroyLock;
+struct lock *PIDLock;
+volatile pid_t PIDCounter;
+*/
 
 /*
  * Mechanism for making the kernel menu thread sleep while processes are running
@@ -98,6 +105,20 @@ proc_create(const char *name)
 
 	/* VFS fields */
 	proc->p_cwd = NULL;
+
+#if OPT_A2
+	proc->PID = PIDCounter;
+	proc->exitCode = 0;
+	proc->status = Alive;
+	proc->parent = NULL;
+	proc->p_cv = cv_create("child_cv");
+	proc->children = array_create();
+	proc->pLock = lock_create("pLock");
+	if (proc->pLock == NULL) {
+		kfree(proc);
+		return NULL;
+	}
+#endif /* OPT_A2 */
 
 #ifdef UW
 	proc->console = NULL;
@@ -157,6 +178,16 @@ proc_destroy(struct proc *proc)
 	}
 #endif // UW
 
+#if OPT_A2
+	while (array_num(proc->children) > 0) {
+		array_remove(proc->children, 0);
+	}	
+	array_destroy(proc->children);
+	cv_destroy(proc->p_cv);
+	lock_destroy(proc->pLock);
+
+#endif /* OPT_A2 */
+
 #ifdef UW
 	if (proc->console) {
 	  vfs_close(proc->console);
@@ -169,6 +200,10 @@ proc_destroy(struct proc *proc)
 	kfree(proc->p_name);
 	kfree(proc);
 
+#if OPT_A2
+	proc = NULL;
+#endif /* OPT_A2 */
+
 #ifdef UW
 	/* decrement the process count */
         /* note: kproc is not included in the process count, but proc_destroy
@@ -177,6 +212,7 @@ proc_destroy(struct proc *proc)
 	P(proc_count_mutex); 
 	KASSERT(proc_count > 0);
 	proc_count--;
+	//kprintf("%d", proc_count);
 	/* signal the kernel menu thread if the process count has reached zero */
 	if (proc_count == 0) {
 	  V(no_proc_sem);
@@ -193,10 +229,16 @@ proc_destroy(struct proc *proc)
 void
 proc_bootstrap(void)
 {
+  
+#if OPT_A2
+  PIDCounter = 10;
+#endif /* OPT_A2 */  
+  
   kproc = proc_create("[kernel]");
   if (kproc == NULL) {
     panic("proc_create for kproc failed\n");
   }
+
 #ifdef UW
   proc_count = 0;
   proc_count_mutex = sem_create("proc_count_mutex",1);
@@ -208,6 +250,13 @@ proc_bootstrap(void)
     panic("could not create no_proc_sem semaphore\n");
   }
 #endif // UW 
+
+#if OPT_A2
+  PIDLock = lock_create("PIDLock");
+  if (PIDLock == NULL) {
+    panic("could not create PIDLock\n");
+  };
+#endif /* OPT_A2 */
 }
 
 /*

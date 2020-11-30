@@ -38,12 +38,33 @@
 
 #include <spinlock.h>
 #include <thread.h> /* required for struct threadarray */
+#include "opt-A2.h"
+#include <synch.h>
+#include <array.h>
+ 
+#if OPT_A2
+struct lock *destroyLock;
+struct lock *PIDLock;
+volatile pid_t PIDCounter;
+#endif /* OPT_A2 */
 
 struct addrspace;
 struct vnode;
 #ifdef UW
 struct semaphore;
 #endif // UW
+
+#if OPT_A2
+
+enum Status {
+
+Alive = 0,
+Zombie = 1,
+Exit = 2
+
+};
+
+#endif
 
 /*
  * Process structure.
@@ -58,6 +79,16 @@ struct proc {
 
 	/* VFS */
 	struct vnode *p_cwd;		/* current working directory */
+
+#if OPT_A2	
+	pid_t PID;
+	int exitCode;
+	enum Status status;
+	struct proc* parent;
+	struct cv* p_cv;
+	struct array* children;
+	struct lock* pLock;
+#endif /* OPT_A2 */
 
 #ifdef UW
   /* a vnode to refer to the console device */

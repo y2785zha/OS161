@@ -44,6 +44,8 @@
 #include <vfs.h>
 #include <syscall.h>
 #include <test.h>
+#include "opt-A2.h"
+#include <copyinout.h>
 
 /*
  * Load program "progname" and start running it in usermode.
@@ -51,8 +53,13 @@
  *
  * Calls vfs_open on progname and thus may destroy it.
  */
+
+#if OPT_A2
+int runprogram(char *progname, int args_count, char **args) 
+#else
 int
 runprogram(char *progname)
+#endif
 {
 	struct addrspace *as;
 	struct vnode *v;
@@ -76,7 +83,11 @@ runprogram(char *progname)
 	}
 
 	/* Switch to it and activate it. */
+#if OPT_A2
+	struct addrspace *old_as = curproc_setas(as);
+#else
 	curproc_setas(as);
+#endif	
 	as_activate();
 
 	/* Load the executable. */
@@ -96,11 +107,75 @@ runprogram(char *progname)
 		/* p_addrspace will go away when curproc is destroyed */
 		return result;
 	}
+#if OPT_A2
+	////////////////////////////////////////////////////////////
+        // Copy arguments onto the stack
+        // First copy argument, then the pointers to these arguments
+        vaddr_t stack_counter = stackptr;
+        //kprintf("%p\n", (void *) stack_counter);
 
+        // Need to keep track of pointers to arguments on the stack
+        vaddr_t *stack_addr = kmalloc((args_count + 1) * sizeof(vaddr_t));
+        if (stack_addr == NULL) {
+                return ENOMEM;
+        }
+	
+	size_t args_total_size = 0;
+        for (int i = 0; i < args_count; i++) {
+                args_total_size += (strlen(args[i]) + 1) * sizeof(char);
+        }
+        args_total_size = ROUNDUP(args_total_size, 8);
+        stack_counter -= args_total_size;
+        vaddr_t start_of_args = stack_counter;
+        // Copy arguments onto the stack, then store the address in stack_addr
+        for (int i = 0; i <= args_count; i++) {
+                if (i == args_count) {
+                        stack_addr[i] = (vaddr_t) NULL;
+                } else {
+                        //kprintf("%p\n", (void *) stack_counter);
+			size_t args_len = strlen(args[i]) + 1;
+			int err = copyout(args[i], (userptr_t) stack_counter, args_len);
+                        if (err) {
+                                return err;
+                        }
+                        stack_addr[i] = stack_counter;
+			stack_counter += args_len * sizeof(char);
+                }
+        }
+
+        stack_counter = start_of_args;
+
+        // Calculate the address of the pointer array, then copy the pointers one by one
+        size_t ptr_array_size = (args_count + 1) * sizeof(vaddr_t);
+        ptr_array_size = ROUNDUP(ptr_array_size, 8);
+	stack_counter -= ptr_array_size;
+        vaddr_t top_of_stack = stack_counter;
+
+        // From this addr aligned by 8, list the pointers
+        for (int i = 0; i <= args_count; i++) {
+                size_t ptr_size = sizeof(vaddr_t);
+                //kprintf("%p\n", (void *) stack_counter);
+                int err = copyout((void *) &stack_addr[i], (userptr_t) stack_counter, ptr_size);
+                if (err) {
+                        return err;
+                }
+                stack_counter += ptr_size;
+        }
+
+        // destroy old as
+        as_destroy(old_as);
+	
+	// free memory
+        kfree(stack_addr);
+	
+	/* Warp to user mode. */
+        enter_new_process(args_count /*argc*/, (userptr_t)top_of_stack /*userspace addr of argv*/,
+                          top_of_stack, entrypoint);
+#else
 	/* Warp to user mode. */
 	enter_new_process(0 /*argc*/, NULL /*userspace addr of argv*/,
 			  stackptr, entrypoint);
-	
+#endif	
 	/* enter_new_process does not return. */
 	panic("enter_new_process returned\n");
 	return EINVAL;

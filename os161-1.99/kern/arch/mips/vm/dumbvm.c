@@ -37,6 +37,7 @@
 #include <mips/tlb.h>
 #include <addrspace.h>
 #include <vm.h>
+#include "opt-A3.h"
 
 /*
  * Dumb MIPS-only "VM system" that is intended to only be just barely
@@ -50,24 +51,93 @@
  * Wrap rma_stealmem in a spinlock.
  */
 static struct spinlock stealmem_lock = SPINLOCK_INITIALIZER;
+#if OPT_A3
+static paddr_t coremap_start = 0;
+static paddr_t coremap_end = 0;
+static unsigned int coremap_size = 0;
+static bool coremap_created = false;
+static struct spinlock coremap_lock = SPINLOCK_INITIALIZER;
+#endif
 
 void
 vm_bootstrap(void)
 {
+#if OPT_A3
+	ram_getsize(&coremap_start, &coremap_end);
+	coremap_size = (coremap_end - coremap_start) / PAGE_SIZE;
+	//kprintf("%p", (void *)coremap_start);
+	//kprintf("%p", (void *)coremap_end);
+	for (unsigned int i; i < coremap_size; i++) {
+		((int *) PADDR_TO_KVADDR(coremap_start))[i] = 0;
+	}
+	coremap_created = true;
 	/* Do nothing. */
+#endif
 }
+
+#if OPT_A3
+paddr_t 
+coremap_stealmem(unsigned long npages) 
+{
+  kprintf("%d", (int) npages);
+  kprintf("%s", "\n");
+  unsigned int cur_index = 0;
+  while (cur_index < coremap_size) {
+  	int cur_entry = ((int *) PADDR_TO_KVADDR(coremap_start))[cur_index];
+  	unsigned int page_start = cur_index;
+  	unsigned long page_count = 0;
+  
+  	while (cur_entry == 0 && page_start + page_count < coremap_size) {
+		page_count++;
+		if (page_count == npages) {
+			kprintf("%s", "Allocing memory: \n");
+	       		unsigned int frames = page_start;
+			for (unsigned long i = 1; i <= npages; i++) {
+				kprintf("%p", (void *) &((int *) PADDR_TO_KVADDR(coremap_start))[frames]);
+				kprintf("%s", "\n");
+				((int *) PADDR_TO_KVADDR(coremap_start))[frames] = (int) i;
+				frames++;
+			}
+			//paddr_t frame_start = coremap_start + sizeof(int *) * coremap_size;
+			//return frame_start + page_start * PAGE_SIZE;
+			return (page_start + 1) * PAGE_SIZE + coremap_start;
+		} else {
+			cur_index++;
+			cur_entry = ((int *) PADDR_TO_KVADDR(coremap_start))[cur_index];
+		}
+    	}
+	cur_index++; // cur_entry != 0; need a new page_start
+  }
+  return 0;
+}
+#endif
 
 static
 paddr_t
 getppages(unsigned long npages)
 {
 	paddr_t addr;
+#if OPT_A3
+	if (coremap_created) {
+		spinlock_acquire(&coremap_lock);
+		
+		addr = coremap_stealmem(npages);
 
+		spinlock_release(&coremap_lock);
+	} else {
+		spinlock_acquire(&stealmem_lock);
+
+        	addr = ram_stealmem(npages);
+
+        	spinlock_release(&stealmem_lock);
+	}
+#else
 	spinlock_acquire(&stealmem_lock);
 
 	addr = ram_stealmem(npages);
 	
 	spinlock_release(&stealmem_lock);
+#endif
 	return addr;
 }
 
@@ -86,9 +156,46 @@ alloc_kpages(int npages)
 void 
 free_kpages(vaddr_t addr)
 {
+#if OPT_A3
+	paddr_t p_addr = KVADDR_TO_PADDR(addr);
+	spinlock_acquire(&coremap_lock);
+	//paddr_t frame_start = coremap_start + sizeof(int *) * coremap_size;
+	//unsigned int cur_index = (p_addr - frame_start) / PAGE_SIZE;
+	unsigned int cur_index = ((p_addr - coremap_start) / PAGE_SIZE) - 1;
+
+/*	int cur_entry = ((int *) PADDR_TO_KVADDR(coremap_start))[cur_index];
+	int previous_entry = cur_entry;
+
+	((int *) PADDR_TO_KVADDR(coremap_start))[cur_index] = 0;
+	cur_index++;
+	cur_entry = ((int *) PADDR_TO_KVADDR(coremap_start))[cur_index];
+	while (cur_entry == previous_entry + 1) {
+		previous_entry = cur_entry;
+		((int *) PADDR_TO_KVADDR(coremap_start))[cur_index] = 0;
+        	cur_index++;
+        	cur_entry = ((int *) PADDR_TO_KVADDR(coremap_start))[cur_index];
+	}
+*/	kprintf("%s", "Freeing memory: \n");
+	kprintf("%p", (void *) &((int *) PADDR_TO_KVADDR(coremap_start))[cur_index]);
+        kprintf("%s", "\n");		
+	((int*) PADDR_TO_KVADDR(coremap_start))[cur_index] = 0;
+    	cur_index++;
+    	int cur = ((int*) PADDR_TO_KVADDR(coremap_start))[cur_index];
+
+    	while (cur != 0 && cur != 1) {
+		kprintf("%p", (void *) &((int *) PADDR_TO_KVADDR(coremap_start))[cur_index]);
+        	kprintf("%s", "\n");
+      		((int*) PADDR_TO_KVADDR(coremap_start))[cur_index] = 0;
+      		cur_index++;
+      		cur = ((int*) PADDR_TO_KVADDR(coremap_start))[cur_index];
+    	}
+	
+	spinlock_release(&coremap_lock);
+#else
 	/* nothing - leak the memory. */
 
 	(void)addr;
+#endif
 }
 
 void
@@ -120,8 +227,12 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 
 	switch (faulttype) {
 	    case VM_FAULT_READONLY:
+#if OPT_A3
+		return EFAULT;
+#else
 		/* We always create pages read-write, so we can't get this */
 		panic("dumbvm: got VM_FAULT_READONLY\n");
+#endif
 	    case VM_FAULT_READ:
 	    case VM_FAULT_WRITE:
 		break;
@@ -168,8 +279,16 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 	stackbase = USERSTACK - DUMBVM_STACKPAGES * PAGE_SIZE;
 	stacktop = USERSTACK;
 
+#if OPT_A3
+	bool text_seg = false;
+	bool loadelf_completed = as->loadelf_completed;
+#endif
+
 	if (faultaddress >= vbase1 && faultaddress < vtop1) {
 		paddr = (faultaddress - vbase1) + as->as_pbase1;
+#if OPT_A3
+		text_seg = true;
+#endif
 	}
 	else if (faultaddress >= vbase2 && faultaddress < vtop2) {
 		paddr = (faultaddress - vbase2) + as->as_pbase2;
@@ -194,15 +313,30 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 		}
 		ehi = faultaddress;
 		elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
+#if OPT_A3
+		if (text_seg && loadelf_completed) {
+			elo &= ~TLBLO_DIRTY;
+		}
+#endif
 		DEBUG(DB_VM, "dumbvm: 0x%x -> 0x%x\n", faultaddress, paddr);
 		tlb_write(ehi, elo, i);
 		splx(spl);
 		return 0;
 	}
-
+#if OPT_A3
+	ehi = faultaddress;
+	elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
+	if (text_seg && loadelf_completed) {
+        	elo &= ~TLBLO_DIRTY;
+        }
+	tlb_random(ehi, elo);
+	splx(spl);
+	return 0;
+#else
 	kprintf("dumbvm: Ran out of TLB entries - cannot handle page fault\n");
 	splx(spl);
 	return EFAULT;
+#endif
 }
 
 struct addrspace *
