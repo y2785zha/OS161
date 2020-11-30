@@ -163,7 +163,8 @@ runprogram(char *progname)
         }
 
         // destroy old as
-        as_destroy(old_as);
+        //as_destroy(old_as);
+	(void) old_as;
 	
 	// free memory
         kfree(stack_addr);
