@@ -57,6 +57,7 @@ static paddr_t coremap_end = 0;
 static unsigned int coremap_size = 0;
 static bool coremap_created = false;
 static struct spinlock coremap_lock = SPINLOCK_INITIALIZER;
+static struct spinlock pagetable_lock = SPINLOCK_INITIALIZER;
 #endif
 
 void
@@ -80,11 +81,13 @@ paddr_t
 coremap_stealmem(unsigned long npages) 
 {
   unsigned int cur_index = 0;
+  // looking for a valid start for memory allocation
   while (cur_index < coremap_size) {
   	int cur_entry = ((int *) PADDR_TO_KVADDR(coremap_start))[cur_index];
   	unsigned int page_start = cur_index;
   	unsigned long page_count = 0;
   
+	// looking for "npages" consecutive entries of "0" in coremap
   	while (cur_entry == 0 && page_start + page_count < coremap_size) {
 		page_count++;
 		if (page_count == npages) {
@@ -364,6 +367,7 @@ void
 as_destroy(struct addrspace *as)
 {
 #if OPT_A3
+	//spinlock_acquire(&pagetable_lock);
 	for (unsigned int i = 0; i < as->as_npages1; i++) {
     	  free_kpages(PADDR_TO_KVADDR(as->as_pbase1[i]));
   	}
@@ -373,6 +377,7 @@ as_destroy(struct addrspace *as)
         for (unsigned int i = 0; i < DUMBVM_STACKPAGES; i++) {
           free_kpages(PADDR_TO_KVADDR(as->as_stackpbase[i]));
         }
+	//spinlock_release(&pagetable_lock);
 #endif
 	kfree(as);
 }
@@ -466,10 +471,12 @@ as_prepare_load(struct addrspace *as)
 	//KASSERT(as->as_pbase2 == NULL);
 	//KASSERT(as->as_stackpbase == NULL);
 #if OPT_A3
+	// Not contiguous memory segment 
+	// This is what we want for paging
   	for (unsigned int i = 0; i < as->as_npages1; i++) {
     	  paddr_t addr = getppages(1);
     	  if (addr == 0) {
-		 return ENOMEM;
+		return ENOMEM;
 	  }
     	  as->as_pbase1[i] = addr;
     	  as_zero_region(as->as_pbase1[i], 1);
@@ -514,6 +521,7 @@ as_prepare_load(struct addrspace *as)
 	as_zero_region(as->as_pbase2, as->as_npages2);
 	as_zero_region(as->as_stackpbase, DUMBVM_STACKPAGES);
 #endif
+
 	return 0;
 }
 
@@ -536,10 +544,17 @@ as_define_stack(struct addrspace *as, vaddr_t *stackptr)
 int
 as_copy(struct addrspace *old, struct addrspace **ret)
 {
+#if OPT_A3
+	// Acquire lock when copying from the old address space 
+	spinlock_acquire(&pagetable_lock);
+#endif	
 	struct addrspace *new;
 
 	new = as_create();
 	if (new==NULL) {
+#if OPT_A3
+		spinlock_release(&pagetable_lock);
+#endif
 		return ENOMEM;
 	}
 
@@ -548,6 +563,7 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 	new->as_vbase2 = old->as_vbase2;
 	new->as_npages2 = old->as_npages2;
 
+// Allocate frames for the segments
 #if OPT_A3
   new->as_pbase1 = kmalloc(sizeof(paddr_t) * old->as_npages1);
   new->as_pbase2 = kmalloc(sizeof(paddr_t) * old->as_npages2);
@@ -557,6 +573,9 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 	/* (Mis)use as_prepare_load to allocate some physical memory. */
 	if (as_prepare_load(new)) {
 		as_destroy(new);
+#if OPT_A3
+		spinlock_release(&pagetable_lock);
+#endif
 		return ENOMEM;
 	}
 
@@ -564,6 +583,7 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 	KASSERT(new->as_pbase2 != 0);
 	KASSERT(new->as_stackpbase != 0);
 
+// Copying from the old address space to the frames
 #if OPT_A3
   for (unsigned int i = 0; i < old->as_npages1; i++) {
     memmove((void *)PADDR_TO_KVADDR(new->as_pbase1[i]),
@@ -592,5 +612,8 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 		DUMBVM_STACKPAGES*PAGE_SIZE);
 #endif	
 	*ret = new;
+#if OPT_A3
+	spinlock_release(&pagetable_lock);
+#endif	
 	return 0;
 }
