@@ -80,34 +80,35 @@ vm_bootstrap(void)
 paddr_t 
 coremap_stealmem(unsigned long npages) 
 {
-  unsigned int cur_index = 0;
   // looking for a valid start for memory allocation
-  while (cur_index < coremap_size) {
+  for (unsigned int cur_index = 0; cur_index < coremap_size; cur_index++) {
   	int cur_entry = ((int *) PADDR_TO_KVADDR(coremap_start))[cur_index];
   	unsigned int page_start = cur_index;
   	unsigned long page_count = 0;
   
 	// looking for "npages" consecutive entries of "0" in coremap
   	while (cur_entry == 0 && page_start + page_count < coremap_size) {
-		page_count++;
+		page_count += 1;
 		if (page_count == npages) {
 			//kprintf("%s", "Allocing memory: \n");
 	       		unsigned int frames = page_start;
-			for (unsigned long i = 1; i <= npages; i++) {
+			unsigned long i = 1;
+			while (i <= npages) {
 				//kprintf("%p", (void *) &((int *) PADDR_TO_KVADDR(coremap_start))[frames]);
 				//kprintf("%s", "\n");
 				((int *) PADDR_TO_KVADDR(coremap_start))[frames] = (int) i;
-				frames++;
+				i += 1;
+				frames += 1;
 			}
 			//paddr_t frame_start = coremap_start + sizeof(int *) * coremap_size;
 			//return frame_start + page_start * PAGE_SIZE;
 			return (page_start + 1) * PAGE_SIZE + coremap_start;
 		} else {
-			cur_index++;
+			cur_index += 1;
 			cur_entry = ((int *) PADDR_TO_KVADDR(coremap_start))[cur_index];
 		}
     	}
-	cur_index++; // cur_entry != 0; need a new page_start
+	// cur_entry != 0; need a new page_start
   }
   return 0;
 }
@@ -158,8 +159,8 @@ void
 free_kpages(vaddr_t addr)
 {
 #if OPT_A3
-	paddr_t p_addr = KVADDR_TO_PADDR(addr);
 	spinlock_acquire(&coremap_lock);
+	paddr_t p_addr = KVADDR_TO_PADDR(addr);
 	//paddr_t frame_start = coremap_start + sizeof(int *) * coremap_size;
 	//unsigned int cur_index = (p_addr - frame_start) / PAGE_SIZE;
 	unsigned int cur_index = ((p_addr - coremap_start) / PAGE_SIZE) - 1;
@@ -267,6 +268,7 @@ vm_fault(int faulttype, vaddr_t faultaddress)
 #if OPT_A3
 	bool text_seg = false;
 	bool loadelf_completed = as->loadelf_completed;
+
 	if (faultaddress >= vbase1 && faultaddress < vtop1) {
 		paddr = (faultaddress - vbase1) + as->as_pbase1[0];
     		text_seg = true;
@@ -369,13 +371,16 @@ as_destroy(struct addrspace *as)
 #if OPT_A3
 	//spinlock_acquire(&pagetable_lock);
 	for (unsigned int i = 0; i < as->as_npages1; i++) {
-    	  free_kpages(PADDR_TO_KVADDR(as->as_pbase1[i]));
+	  paddr_t paddr = PADDR_TO_KVADDR(as->as_pbase1[i]);
+    	  free_kpages(paddr);
   	}
         for (unsigned int i = 0; i < as->as_npages2; i++) {
-          free_kpages(PADDR_TO_KVADDR(as->as_pbase2[i]));
+	  paddr_t paddr = PADDR_TO_KVADDR(as->as_pbase2[i]);
+          free_kpages(paddr);
         }
         for (unsigned int i = 0; i < DUMBVM_STACKPAGES; i++) {
-          free_kpages(PADDR_TO_KVADDR(as->as_stackpbase[i]));
+	  paddr_t paddr = PADDR_TO_KVADDR(as->as_stackpbase[i]);
+          free_kpages(paddr);
         }
 	//spinlock_release(&pagetable_lock);
 #endif
@@ -473,33 +478,39 @@ as_prepare_load(struct addrspace *as)
 #if OPT_A3
 	// Not contiguous memory segment 
 	// This is what we want for paging
-  	for (unsigned int i = 0; i < as->as_npages1; i++) {
-    	  paddr_t addr = getppages(1);
-    	  if (addr == 0) {
-		return ENOMEM;
-	  }
-    	  as->as_pbase1[i] = addr;
-    	  as_zero_region(as->as_pbase1[i], 1);
+    unsigned int pages1_cur = 0;
+  	while(pages1_cur < as->as_npages1) {
+    	  paddr_t paddr = getppages(1);
+    	  if (paddr == 0) {
+		     return ENOMEM;
+	      }
+    	  as->as_pbase1[pages1_cur] = paddr;
+    	  as_zero_region(as->as_pbase1[pages1_cur], 1);
+          pages1_cur ++;
   	}
-  	for (unsigned int i = 0; i < as->as_npages2; i++) {
-    	  paddr_t addr = getppages(1);
-    	  if (addr == 0) {
-		return ENOMEM;
-	  }
-    	  as->as_pbase2[i] = addr;
-    	  as_zero_region(as->as_pbase2[i], 1);
-  	}
+    unsigned int pages2_cur = 0;
+    while(pages2_cur < as->as_npages2) {
+         paddr_t paddr = getppages(1);
+         if (paddr == 0) {
+             return ENOMEM;
+         }
+         as->as_pbase2[pages2_cur] = paddr;
+         as_zero_region(as->as_pbase2[pages2_cur], 1);
+         pages2_cur ++;
+    }
 	as->as_stackpbase = kmalloc(sizeof(paddr_t) * DUMBVM_STACKPAGES);
 	if (as->as_stackpbase == NULL) {
 		return ENOMEM;
 	}
-  	for (unsigned int i = 0; i < DUMBVM_STACKPAGES; i++) {
-    	  paddr_t addr = getppages(1);
-    	  if (addr == 0) {
-		return ENOMEM;
+    unsigned int stackpages_cur = 0;
+  	while(stackpages_cur < DUMBVM_STACKPAGES) {
+    	  paddr_t paddr = getppages(1);
+    	  if (paddr == 0) {
+		     return ENOMEM;
 	  }
-    	  as->as_stackpbase[i] = addr;
-    	  as_zero_region(as->as_stackpbase[i], 1);
+         as->as_stackpbase[stackpages_cur] = paddr;
+         as_zero_region(as->as_stackpbase[stackpages_cur], 1);
+         stackpages_cur ++;
   	}
 #else
 	as->as_pbase1 = getppages(as->as_npages1);
@@ -585,17 +596,20 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 
 // Copying from the old address space to the frames
 #if OPT_A3
-  for (unsigned int i = 0; i < old->as_npages1; i++) {
-    memmove((void *)PADDR_TO_KVADDR(new->as_pbase1[i]),
-      (const void *)PADDR_TO_KVADDR(old->as_pbase1[i]),PAGE_SIZE);
+  unsigned int pages1_cur = 0;
+  while (pages1_cur < old->as_npages1) {
+	memmove((void *)PADDR_TO_KVADDR(new->as_pbase1[pages1_cur]), (const void *)PADDR_TO_KVADDR(old->as_pbase1[pages1_cur]),PAGE_SIZE);
+        pages1_cur ++;
   }
-  for (unsigned int i = 0; i < old->as_npages2; i++) {
-    memmove((void *)PADDR_TO_KVADDR(new->as_pbase2[i]),
-      (const void *)PADDR_TO_KVADDR(old->as_pbase2[i]),PAGE_SIZE);
+  unsigned int pages2_cur = 0;
+  while (pages2_cur < old->as_npages2) {
+   	memmove((void *)PADDR_TO_KVADDR(new->as_pbase2[pages2_cur]), (const void *)PADDR_TO_KVADDR(old->as_pbase2[pages2_cur]),PAGE_SIZE);
+        pages2_cur ++;
   }
-  for (unsigned int i = 0; i < DUMBVM_STACKPAGES; i++) {
-    memmove((void *)PADDR_TO_KVADDR(new->as_stackpbase[i]),
-      (const void *)PADDR_TO_KVADDR(old->as_stackpbase[i]),PAGE_SIZE);
+  unsigned int stackpages_cur = 0;
+  while (stackpages_cur < DUMBVM_STACKPAGES) {
+    	memmove((void *)PADDR_TO_KVADDR(new->as_stackpbase[stackpages_cur]), (const void *)PADDR_TO_KVADDR(old->as_stackpbase[stackpages_cur]),PAGE_SIZE);
+        stackpages_cur ++;
   }
 #else
 
@@ -617,3 +631,4 @@ as_copy(struct addrspace *old, struct addrspace **ret)
 #endif	
 	return 0;
 }
+
